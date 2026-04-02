@@ -90,3 +90,43 @@ def _extract_from_html(html: str) -> list[dict]:
 
     return products
 
+
+async def scrape_search(query: str, pages: int = 1) -> list[dict]:
+    all_products = []
+
+    async with httpx.AsyncClient(headers=get_myntra_headers(), timeout=25, follow_redirects=True) as client:
+        for page in range(1, max(1, pages) + 1):
+            offset = (page - 1) * 50
+            api_target = f"{API_URL}/{urllib.parse.quote(query)}?rows=50&o={offset}&plaEnabled=false"
+
+            try:
+                response = await client.get(api_target)
+                response.raise_for_status()
+                payload = response.json()
+                for item in payload.get("products", []):
+                    normalized = _normalize_item(item)
+                    if normalized["name"] and normalized["source_id"]:
+                        all_products.append(normalized)
+                continue
+            except Exception:
+                pass
+
+            try:
+                html_target = f"{BASE_URL}/{urllib.parse.quote(query.replace(' ', '-'))}"
+                response = await client.get(html_target)
+                response.raise_for_status()
+                all_products.extend(_extract_from_html(response.text))
+            except Exception as exc:
+                print(f"[Myntra] scrape error on page {page}: {exc}")
+
+    deduped = {}
+    for product in all_products:
+        deduped[product["source_id"]] = product
+
+    results = list(deduped.values())
+    if results:
+        await upsert_products(results)
+    await log_scrape("myntra", query, len(results))
+    return results
+
+
