@@ -221,3 +221,103 @@ def _extract_from_rendered_cards(html: str) -> list[dict]:
             "scraped_at": datetime.now(timezone.utc).isoformat(),
         })
 
+deduped = {}
+    for product in results:
+        existing = deduped.get(product["source_id"])
+        if not existing:
+            deduped[product["source_id"]] = product
+            continue
+        existing_score = int(existing.get("current_price") is not None) + int(bool(existing.get("image")))
+        product_score = int(product.get("current_price") is not None) + int(bool(product.get("image")))
+        if product_score >= existing_score:
+            deduped[product["source_id"]] = product
+    return list(deduped.values())
+
+
+def _build_search_targets(query: str, page: int) -> list[str]:
+    encoded_query = urllib.parse.quote(query)
+    salt_query = urllib.parse.quote(query.upper())
+    targets = [
+        template.format(base=BASE_URL, query=encoded_query, page=page)
+        for template in SEARCH_URLS
+    ]
+    if page == 1:
+        targets.extend(
+            [
+                f"{BASE_URL}/salt/{salt_query}",
+                f"{BASE_URL}/salt/{encoded_query}",
+            ]
+        )
+    return targets
+
+
+async def _scrape_with_playwright(url: str) -> list[dict]:
+    supported, reason = can_use_playwright()
+    if not supported:
+        print(f"[Apollo Pharmacy] Playwright unavailable: {reason}")
+        return []
+
+    try:
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.async_api import async_playwright
+
+        async def _runner():
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                page = await browser.new_page()
+
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                    await page.wait_for_selector("a[aria-label][href^='/otc/'], a[aria-label][href^='/medicine/']", timeout=15000)
+                except PlaywrightTimeoutError:
+                    pass
+
+                await page.wait_for_timeout(5000)
+                html = await page.content()
+                await browser.close()
+                return _extract_from_rendered_cards(html)
+
+        return await run_playwright_task(_runner)
+    except NotImplementedError as exc:
+        print(f"[Apollo Pharmacy] Playwright environment not supported: {exc}")
+    except Exception as exc:
+        print(f"[Apollo Pharmacy] Playwright fallback failed: {exc}")
+
+    return []
+
+
+async def scrape_search(query: str, pages: int = 1) -> list[dict]:
+    all_products = []
+
+    async with httpx.AsyncClient(headers=get_apollo_headers(), timeout=25, follow_redirects=True) as client:
+        for page in range(1, max(1, pages) + 1):
+            products = []
+            attempted_targets = _build_search_targets(query, page)
+
+            for target in attempted_targets:
+                try:
+                    response = await client.get(target)
+                    response.raise_for_status()
+                    products = _extract_from_html(response.text)
+                    if products:
+                        print(f"[Apollo Pharmacy] Scraping: {target}")
+                        break
+                    print(f"[Apollo Pharmacy] No products found in HTML for {target}")
+                except Exception as exc:
+                    print(f"[Apollo Pharmacy] HTTP fetch failed for {target}: {exc}")
+
+            if not products:
+                products = await _scrape_with_playwright(attempted_targets[0])
+
+            print(f"[Apollo Pharmacy] Page {page}: {len(products)} products")
+            all_products.extend(products)
+
+    deduped = {}
+    for product in all_products:
+        deduped[product["source_id"]] = product
+
+    results = list(deduped.values())
+    if results:
+        await upsert_products(results)
+    await log_scrape("apollo_pharmacy", query, len(results))
+    return results
