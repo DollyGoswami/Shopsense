@@ -3,7 +3,6 @@ import { authService } from "../services/authService";
 import toast from "react-hot-toast";
 
 const AuthContext = createContext(null);
-
 export function AuthProvider({ children }) {
   const [user,    setUser]    = useState(null);
   const [loading, setLoading] = useState(true);
