@@ -244,4 +244,102 @@ async def _fetch_html(url: str) -> Optional[str]:
             proxy_manager.mark_bad(proxy)
         raise
 
+async def _fetch_with_playwright(url: str) -> Optional[str]:
+    """
+    Fallback: use Playwright headless browser when httpx gets blocked.
+    Install with: playwright install chromium
+    """
+    try:
+        from playwright.async_api import async_playwright
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent=get_amazon_headers()["User-Agent"],
+                locale="en-IN",
+                timezone_id="Asia/Kolkata",
+            )
+            page = await context.new_page()
+
+            # Block images/fonts to speed up
+            await page.route("**/*.{png,jpg,jpeg,gif,svg,woff,woff2}", lambda r: r.abort())
+
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(random.randint(1500, 3000))   # human-like delay
+
+            html = await page.content()
+            await browser.close()
+            return html
+    except NotImplementedError as e:
+        print(f"[Amazon] Playwright environment not supported: {e}")
+        return None
+    except Exception as e:
+        print(f"[Amazon] Playwright error: {e}")
+        return None
+
+
+async def scrape_search(query: str, pages: int = 2) -> list[dict]:
+    """
+    Scrape Amazon search results for a query.
+    Returns list of product dicts and saves to MongoDB.
+    """
+    all_products = []
+
+    for page in range(1, pages + 1):
+        url  = _build_search_url(query, page)
+        print(f"[Amazon] Scraping: {url}")
+
+        html = await _fetch_html(url)
+
+        # Skip Playwright fallback for now due to environment issues
+        # if not html or "Enter the characters you see below" in html or "api-services-support@amazon.com" in html:
+        #     print("[Amazon] Blocked by CAPTCHA — using Playwright fallback")
+        #     html = await _fetch_with_playwright(url)
+
+        if not html:
+            print(f"[Amazon] Failed to fetch page {page}")
+            break
+
+        products = _parse_search_results(html)
+        print(f"[Amazon] Page {page}: found {len(products)} products")
+
+        await upsert_products(products)
+
+        all_products.extend(products)
+        await asyncio.sleep(random.uniform(2.0, 5.0))   # between pages
+
+    await log_scrape("amazon", query, len(all_products))
+    return all_products
+
+
+async def scrape_product(asin: str) -> Optional[dict]:
+    """
+    Scrape a single Amazon product detail page by ASIN.
+    Example ASIN: B0CHX2FKNN (Samsung S24)
+    """
+    url  = f"https://www.amazon.in/dp/{asin}"
+    html = await _fetch_html(url)
+
+    if not html or "Enter the characters" in html:
+        html = await _fetch_with_playwright(url)
+
+    if not html:
+        return None
+
+    product = _parse_product_detail(html, asin)
+    if product:
+        await upsert_product(product)
+
+    return product
+
+
+async def scrape_products_by_asins(asins: list[str]) -> list[dict]:
+    """Scrape multiple ASINs concurrently (limited concurrency)."""
+    semaphore = asyncio.Semaphore(3)   # max 3 concurrent requests
+
+    async def scrape_one(asin):
+        async with semaphore:
+            return await scrape_product(asin)
+
+    results = await asyncio.gather(*[scrape_one(a) for a in asins], return_exceptions=True)
+    return [r for r in results if isinstance(r, dict)]
 
