@@ -148,6 +148,147 @@ def _parse_search_results(html: str) -> list[dict]:
             )
             href = link_tag.get("href") if link_tag else None
             url = None
+            
+            price_tag = (
+                card.select_one("div.hZ3P6w")
+                or card.select_one("div.Nx9bqj")
+                or card.select_one("div._30jeq3")
+                or card.select_one("div._25b18c ._30jeq3")
+            )
+            current_price = clean_price(price_tag.get_text(" ", strip=True) if price_tag else "")
+            if current_price is None:
+                continue
+
+            mrp_tag = (
+                card.select_one("div.yRaY8j")
+                or card.select_one("div._3I9_wc")
+                or card.select_one("div._25b18c ._3I9_wc")
+            )
+            original_price = clean_price(mrp_tag.get_text(" ", strip=True) if mrp_tag else "")
+
+            disc_tag = card.select_one("div.UkUFwK") or card.select_one("div._3Ay6Sb") or card.select_one("div._1V_ZGU")
+            discount_pct = None
+            if disc_tag:
+                match = re.search(r"(\d+)\s*%", disc_tag.get_text(" ", strip=True))
+                discount_pct = int(match.group(1)) if match else None
+            if discount_pct is None and original_price and original_price > current_price:
+                discount_pct = round(((original_price - current_price) / original_price) * 100)
+
+            rating_tag = (
+                card.select_one("div.MKiFS6")
+                or card.select_one("div.XQDdHH")
+                or card.select_one("div._3LWZlK")
+                or card.select_one("span._1lRcqv")
+            )
+            rating = clean_rating(rating_tag.get_text(" ", strip=True) if rating_tag else "")
+
+            reviews_tag = (
+                card.select_one("span.PvbNMB")
+                or card.select_one("span.Wphh3N")
+                or card.select_one("span._2_R_DZ")
+                or card.select_one("span.count")
+            )
+            review_count = clean_review_count(reviews_tag.get_text(" ", strip=True) if reviews_tag else "")
+
+            img_tag = (
+                card.select_one("img.UCc1lI")
+                or card.select_one("img.DByuf4")
+                or card.select_one("img._396cs4")
+                or card.select_one("img._2r_T1I")
+                or card.select_one("img")
+            )
+            image = None
+            if img_tag:
+                image = img_tag.get("src") or img_tag.get("data-src")
+                if image and "128/128" in image:
+                    image = image.replace("128/128", "416/416")
+
+            availability = detect_availability(card.get_text(" ", strip=True) or "in stock")
+
+            products.append(
+                {
+                    "source": "flipkart",
+                    "source_id": pid,
+                    "name": name,
+                    "url": url,
+                    "image": image,
+                    "current_price": current_price,
+                    "original_price": original_price,
+                    "discount_pct": discount_pct,
+                    "rating": rating,
+                    "review_count": review_count,
+                    "currency": "INR",
+                    "availability": availability,
+                    "scraped_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        except Exception as e:
+            print(f"[Flipkart] Card parse error: {e}")
+            continue
+
+    return products
+
+
+def _parse_product_detail(html: str, pid: str, url: str) -> Optional[dict]:
+    soup = BeautifulSoup(html, "lxml")
+
+    try:
+        name_tag = soup.select_one("span.B_NuCI") or soup.select_one("h1.yhB1nd")
+        name = normalize_product_name(name_tag.get_text(" ", strip=True) if name_tag else "")
+
+        price_tag = soup.select_one("div.Nx9bqj.CxhGGd") or soup.select_one("div._30jeq3._16Jk6d")
+        current_price = clean_price(price_tag.get_text(" ", strip=True) if price_tag else "")
+
+        mrp_tag = soup.select_one("div.yRaY8j.A6+RM") or soup.select_one("div._3I9_wc._2p6lqe")
+        original_price = clean_price(mrp_tag.get_text(" ", strip=True) if mrp_tag else "")
+
+        disc_tag = soup.select_one("div.VGWI6T") or soup.select_one("div._3Ay6Sb._31Dcoz")
+        discount_pct = None
+        if disc_tag:
+            match = re.search(r"(\d+)\s*%", disc_tag.get_text(" ", strip=True))
+            discount_pct = int(match.group(1)) if match else None
+
+        rating_tag = soup.select_one("div._3LWZlK.ior6Oa") or soup.select_one("div._3LWZlK")
+        rating = clean_rating(rating_tag.get_text(" ", strip=True) if rating_tag else "")
+
+        reviews_tag = soup.select_one("span.Wphh3N") or soup.select_one("span._2_R_DZ") or soup.select_one("span.Y1HWO0")
+        review_count = clean_review_count(reviews_tag.get_text(" ", strip=True) if reviews_tag else "")
+
+        img_tag = soup.select_one("img._396cs4") or soup.select_one("img.DByuf4") or soup.select_one("img")
+        image = img_tag.get("src") if img_tag else None
+
+        highlights = soup.select("div._2418kt li") or soup.select("ul li._21Ahn-")
+        features = [item.get_text(" ", strip=True) for item in highlights[:6] if item.get_text(" ", strip=True)]
+
+        avail_tag = soup.select_one("div._16FRp0") or soup.select_one("div[class*='stock']")
+        availability = detect_availability(avail_tag.get_text(" ", strip=True) if avail_tag else "in stock")
+
+        brand_tag = soup.select_one("span.G6XhRU") or soup.select_one("span.mEh187")
+        brand = brand_tag.get_text(" ", strip=True) if brand_tag else None
+
+        return {
+            "source": "flipkart",
+            "source_id": pid,
+            "name": name,
+            "url": url,
+            "image": image,
+            "current_price": current_price,
+            "original_price": original_price,
+            "discount_pct": discount_pct,
+            "rating": rating,
+            "review_count": review_count,
+            "brand": brand,
+            "features": features,
+            "currency": "INR",
+            "availability": availability,
+            "scraped_at": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        print(f"[Flipkart] Detail parse error: {e}")
+        return None
+
+
+
             if href:
                 url = href if href.startswith("http") else BASE_URL + href
 
