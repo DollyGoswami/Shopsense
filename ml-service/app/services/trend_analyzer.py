@@ -117,5 +117,64 @@ async def compute_trend_score(product: dict) -> float:
     # Fallback
     return _estimate_trend_from_scraped_data(product)
 
+async def compute_trend_scores_batch(products: list[dict]) -> dict:
+    """
+    Compute trend scores for multiple products concurrently.
+    Returns dict of {product_id: trend_score}
+    """
+    semaphore = asyncio.Semaphore(5)
+
+    async def score_one(p):
+        async with semaphore:
+            pid   = str(p.get("_id") or p.get("source_id", ""))
+            score = await compute_trend_score(p)
+            return pid, score
+
+    results = await asyncio.gather(*[score_one(p) for p in products])
+    return dict(results)
+
+
+def detect_trend_decay(daily_counts: list[int]) -> dict:
+    """
+    Predict when a trend will decay.
+    Returns: {decaying: bool, days_until_decay: int, confidence: float}
+    """
+    if len(daily_counts) < 5:
+        return {"decaying": False, "days_until_decay": None, "confidence": 0.0}
+
+    import numpy as np
+    x = np.arange(len(daily_counts), dtype=float)
+    y = np.array(daily_counts, dtype=float)
+
+    # Linear fit to detect declining slope
+    x_m, y_m = x.mean(), y.mean()
+    b = np.sum((x - x_m) * (y - y_m)) / (np.sum((x - x_m) ** 2) + 1e-9)
+
+    decaying = b < -10  # declining by >10 mentions/day
+
+    # Estimate days until trend hits baseline (20% of peak)
+    if decaying and y_m > 0:
+        peak   = max(y)
+        target = peak * 0.2
+        current = y[-1]
+        if b < 0 and current > target:
+            days_until = int((current - target) / abs(b))
+        else:
+            days_until = 0
+    else:
+        days_until = None
+
+    # Confidence based on R²
+    y_pred    = x_m + b * (x - x_m) + y_m
+    ss_res    = np.sum((y - y_pred) ** 2)
+    ss_tot    = np.sum((y - y_m) ** 2) + 1e-9
+    r_squared = max(0, 1 - ss_res / ss_tot)
+
+    return {
+        "decaying":          decaying,
+        "days_until_decay":  days_until,
+        "slope":             round(float(b), 2),
+        "confidence":        round(float(r_squared), 3),
+    }
 
 
