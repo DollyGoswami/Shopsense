@@ -111,3 +111,113 @@ def _walk_products(node, results):
     elif isinstance(node, list):
         for value in node:
             _walk_products(value, results)
+
+
+def _extract_from_html(html: str) -> list[dict]:
+    soup = BeautifulSoup(html, "lxml")
+    results = []
+
+    for script in soup.find_all("script"):
+        text = script.string or script.get_text() or ""
+        if not text:
+            continue
+
+        if script.get("type") == "application/ld+json":
+            try:
+                _walk_products(json.loads(text), results)
+            except Exception:
+                pass
+
+        if "__NEXT_DATA__" in text or "products" in text.lower():
+            for match in re.finditer(r'(\{.*"props".*\})', text, re.DOTALL):
+                try:
+                    payload = json.loads(match.group(1))
+                    _walk_products(payload, results)
+                except Exception:
+                    continue
+
+    if not results:
+        results.extend(_extract_from_rendered_cards(html))
+
+    deduped = {}
+    for product in results:
+        if not product["name"] or not product["source_id"]:
+            continue
+        existing = deduped.get(product["source_id"])
+        if not existing:
+            deduped[product["source_id"]] = product
+            continue
+        existing_score = int(existing.get("current_price") is not None) + int(bool(existing.get("image"))) + int(bool(existing.get("description")))
+        product_score = int(product.get("current_price") is not None) + int(bool(product.get("image"))) + int(bool(product.get("description")))
+        if product_score >= existing_score:
+            deduped[product["source_id"]] = product
+    return list(deduped.values())
+
+
+def _extract_from_rendered_cards(html: str) -> list[dict]:
+    soup = BeautifulSoup(html, "lxml")
+    results = []
+
+    link_selectors = [
+        "a[aria-label][href*='/otc/']",
+        "a[aria-label][href*='/medicine/']",
+        "a[aria-label][href*='/products/']",
+        "a[href*='/otc/']",
+        "a[href*='/medicine/']",
+        "a[href*='/products/']",
+        "a[href*='/prescriptions/']",
+        "a[href*='/search-product/']",
+    ]
+
+    for link in soup.select(", ".join(link_selectors)):
+        name = normalize_product_name(
+            link.get("aria-label")
+            or link.get("title")
+            or link.get_text(" ", strip=True)
+        )
+        href = link.get("href") or ""
+        if not _is_valid_product_name(name) or not href or not _is_product_path(href):
+            continue
+
+        card = (
+            link.find_parent("div", class_=re.compile(r"ProductCard_"))
+            or link.find_parent("div", attrs={"data-testid": re.compile(r"product", re.IGNORECASE)})
+            or link.find_parent("article")
+            or link.find_parent("li")
+            or link.find_parent("div", class_=re.compile(r"product", re.IGNORECASE))
+            or link.parent
+        )
+        card_text = card.get_text("\n", strip=True) if card else link.get_text("\n", strip=True)
+
+        current_match = re.search(r"(?:₹|â‚¹)\s*([\d,]+(?:\.\d+)?)", card_text)
+        original_match = re.search(r"MRP\s*(?:₹|â‚¹)\s*([\d,]+(?:\.\d+)?)", card_text, re.IGNORECASE)
+        discount_match = re.search(r"(\d+)\s*%\s*off", card_text, re.IGNORECASE)
+        subheads = []
+        if card:
+            for tag in card.select("h2, h3, p, span"):
+                text = tag.get_text(" ", strip=True)
+                if text and text != name and text not in subheads:
+                    subheads.append(text)
+                if len(subheads) >= 2:
+                    break
+        image = _extract_image_url((card or link).select_one("img"))
+
+        results.append({
+            "source": "apollo_pharmacy",
+            "source_id": href.rstrip("/").split("/")[-1],
+            "name": name,
+            "category": " / ".join(subheads[:2]) if subheads else "Pharmacy",
+            "url": href if href.startswith("http") else f"{BASE_URL}{href}",
+            "image": image,
+            "images": [image] if image else [],
+            "current_price": clean_price(current_match.group(0) if current_match else ""),
+            "original_price": clean_price(original_match.group(0) if original_match else ""),
+            "discount_pct": int(discount_match.group(1)) if discount_match else None,
+            "rating": None,
+            "review_count": 0,
+            "currency": "INR",
+            "availability": "in_stock" if re.search(r"add\s+to\s+cart|buy\s+now|\badd\b", card_text, re.IGNORECASE) else "unknown",
+            "description": None,
+            "scraped_at": datetime.now(timezone.utc).isoformat(),
+        })
+
