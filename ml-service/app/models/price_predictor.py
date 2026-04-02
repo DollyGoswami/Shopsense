@@ -47,3 +47,137 @@ def _arima_predict(prices: list[float], days_ahead: int = 7) -> list[float]:
         print(f"[PricePredict] ARIMA failed ({e}), falling back to linear regression")
         return _linear_regression_predict(prices, days_ahead)
 
+
+
+def predict_prices(
+    price_history: list[dict],
+    days_ahead: int = 7,
+) -> dict:
+    """
+    Predict future prices from price history records.
+
+    Args:
+        price_history: list of {price: float, timestamp: str} dicts
+                       (sorted oldest→newest)
+        days_ahead:    how many days to forecast
+
+    Returns:
+        {
+          predictions: [{date: str, price: float}, ...],
+          trend:        "up" | "down" | "stable",
+          lowest_predicted: float,
+          lowest_date:      str,
+          buy_decision:     "BUY" | "WAIT",
+          confidence:       float  (0–1)
+        }
+    """
+    # Extract price series
+    prices = [float(p["price"]) for p in price_history if p.get("price")]
+    if not prices:
+        return {
+            "predictions":       [],
+            "trend":             "stable",
+            "lowest_predicted":  None,
+            "lowest_date":       None,
+            "buy_decision":      "BUY",
+            "confidence":        0.0,
+        }
+
+    current_price = prices[-1]
+
+    # Choose model based on data length
+    if len(prices) >= 14:
+        future_prices = _arima_predict(prices, days_ahead)
+        method        = "arima"
+    else:
+        future_prices = _linear_regression_predict(prices, days_ahead)
+        method        = "linear_regression"
+
+    # Build prediction timeline
+    today = datetime.now(timezone.utc)
+    predictions = []
+    for i, price in enumerate(future_prices):
+        date = (today + timedelta(days=i + 1)).strftime("%Y-%m-%d")
+        predictions.append({"date": date, "price": round(price, 2)})
+
+    # Determine trend
+    avg_predicted = np.mean(future_prices)
+    pct_change    = (avg_predicted - current_price) / current_price
+
+    if pct_change < -0.03:
+        trend = "down"
+    elif pct_change > 0.03:
+        trend = "up"
+    else:
+        trend = "stable"
+
+    # Lowest predicted price
+    lowest_price = min(future_prices)
+    lowest_idx   = future_prices.index(lowest_price)
+    lowest_date  = (today + timedelta(days=lowest_idx + 1)).strftime("%Y-%m-%d")
+
+    # Buy decision
+    # If price predicted to drop >3% in next 7 days → WAIT
+    # If price is at/near its predicted lowest → BUY
+    if trend == "down" and pct_change < -0.03:
+        buy_decision = "WAIT"
+    elif trend == "up":
+        buy_decision = "BUY"   # Buy before it rises further
+    else:
+        buy_decision = "BUY"
+
+    # Confidence: higher for longer histories
+    confidence = min(0.9, 0.3 + len(prices) * 0.02)
+
+    return {
+        "predictions":       predictions,
+        "trend":             trend,
+        "trend_pct":         round(pct_change * 100, 2),
+        "lowest_predicted":  round(lowest_price, 2),
+        "lowest_date":       lowest_date,
+        "buy_decision":      buy_decision,
+        "method":            method,
+        "confidence":        round(confidence, 2),
+        "current_price":     current_price,
+    }
+
+
+def compute_price_score(
+    current_price: float,
+    original_price: Optional[float],
+    price_history: list[dict],
+) -> float:
+    """
+    Compute 0–100 price score for the hybrid recommendation model.
+    Higher = better deal.
+    """
+    score = 50.0
+
+    # Discount factor (0–40 pts)
+    if original_price and original_price > 0:
+        discount = (original_price - current_price) / original_price
+        score += min(40.0, discount * 100)
+
+    # Historical position factor (0–30 pts)
+    # Is current price near the historical low?
+    if len(price_history) >= 3:
+        hist_prices = [p["price"] for p in price_history if p.get("price")]
+        if hist_prices:
+            min_hist = min(hist_prices)
+            max_hist = max(hist_prices)
+            price_range = max_hist - min_hist
+            if price_range > 0:
+                position = (max_hist - current_price) / price_range  # 1 = at min, 0 = at max
+                score += position * 30.0
+
+    # Trend bonus (0–10 pts)
+    if len(price_history) >= 5:
+        prediction = predict_prices(price_history, days_ahead=7)
+        if prediction["trend"] == "down":
+            score -= 10  # Penalize: cheaper to wait
+        elif prediction["trend"] == "up":
+            score += 10  # Reward: buy now before it rises
+
+    return round(min(100.0, max(0.0, score)), 1)
+
+
