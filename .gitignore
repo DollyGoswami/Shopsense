@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+
+# Environment secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+
+# Build output
+dist/
+build/
+coverage/
+.vite/
+
+# User-uploaded files
+uploads/
+**/uploads/
+!uploads/.gitkeep
+!**/uploads/.gitkeep
+
+# Python cache / virtual envs
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local scratch file
+backend/check_db.js
