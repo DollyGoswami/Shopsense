@@ -44,3 +44,41 @@ async def run_limited(scraper, query, pages):
             scraper_name = getattr(scraper, "__name__", "unknown")
             print(f"[Scraper Error] {scraper_name}: {e}")
             return []
+
+
+async def scrape_all_platforms(query, pages=2, sources=None):
+    selected_sources = []
+    for source_name in sources or ["amazon", "flipkart", "myntra", "apollo_pharmacy"]:
+        normalized_source = source_name.strip().lower()
+        if normalized_source in SCRAPER_MAP and normalized_source not in selected_sources:
+            selected_sources.append(normalized_source)
+
+    tasks = [run_limited(SCRAPER_MAP[source_name], query, pages) for source_name in selected_sources]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    deduped_products = {}
+    for source_result, source_name in zip(results, selected_sources):
+        if isinstance(source_result, Exception):
+            print(f"[Orchestrator] {source_name} failed: {source_result}")
+            continue
+
+        for product in source_result:
+            normalized = normalize_product(product, source_name)
+            deduped_products[normalized["product_id"]] = normalized
+
+    return list(deduped_products.values())
+
+
+async def refresh_all_default_queries(pages=1):
+    refreshed = []
+
+    for query in DEFAULT_REFRESH_QUERIES:
+        try:
+            results = await scrape_all_platforms(query, pages)
+            refreshed.append({"query": query, "count": len(results)})
+        except Exception as e:
+            print(f"[Refresh] {query} failed: {e}")
+            refreshed.append({"query": query, "count": 0, "error": str(e)})
+
+    return refreshed
+
