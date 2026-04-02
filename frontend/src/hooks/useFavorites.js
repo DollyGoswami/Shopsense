@@ -19,7 +19,6 @@ export function useFavorites() {
       setLoading(false);
     }
   }, []);
-
   useEffect(() => { load(); }, [load]);
 
   const toggle = useCallback(async (productId) => {
