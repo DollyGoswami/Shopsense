@@ -4,7 +4,6 @@
 //  * Every component using var(--bg), var(--text) etc. reacts instantly.
 //  */
 // import { createContext, useContext, useState, useEffect, useCallback } from "react";
-
 // const THEME_CSS = `
 //   :root,[data-theme="dark"]{
 //     --bg:#0f0f13;--bg2:#18181f;--bg3:#22222c;
