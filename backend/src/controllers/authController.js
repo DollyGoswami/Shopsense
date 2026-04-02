@@ -134,3 +134,109 @@ exports.verifyPhoneOTP = async (req, res) => {
 
   sendTokens(res, user);
 };
+
+// ── Forgot Password ───────────────────────────────────────────────────────────
+exports.forgotPassword = async (req, res) => {
+  const { email } = req.body;
+  if (!email)
+    return res.status(400).json({ success: false, message: "Email is required" });
+
+  const user = await User.findOne({ email });
+  // Always return 200 to prevent email enumeration
+  if (!user)
+    return res.json({ success: true, message: "If this email exists, a reset link has been sent." });
+
+  const rawToken  = crypto.randomBytes(32).toString("hex");
+  const hashTok   = hashToken(rawToken);
+
+  user.passwordResetToken   = hashTok;
+  user.passwordResetExpires = Date.now() + 60 * 60 * 1000;  // 1 hour
+  await user.save({ validateBeforeSave: false });
+
+  await sendPasswordResetEmail(email, user.name, rawToken);
+
+  res.json({ success: true, message: "If this email exists, a reset link has been sent." });
+};
+
+// ── Reset Password ────────────────────────────────────────────────────────────
+exports.resetPassword = async (req, res) => {
+  const { token, password } = req.body;
+  if (!token || !password)
+    return res.status(400).json({ success: false, message: "Token and new password required" });
+
+  const hashTok = hashToken(token);
+  const user    = await User.findOne({
+    passwordResetToken:   hashTok,
+    passwordResetExpires: { $gt: Date.now() },
+  }).select("+password");
+
+  if (!user)
+    return res.status(400).json({ success: false, message: "Invalid or expired reset token" });
+
+  user.password             = password;
+  user.passwordResetToken   = undefined;
+  user.passwordResetExpires = undefined;
+  await user.save();
+
+  sendTokens(res, user);
+};
+
+// ── Change Password ───────────────────────────────────────────────────────────
+exports.changePassword = async (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+  if (!currentPassword || !newPassword)
+    return res.status(400).json({ success: false, message: "Both current and new password required" });
+
+  const user = await User.findById(req.user._id).select("+password");
+  if (!(await user.comparePassword(currentPassword)))
+    return res.status(400).json({ success: false, message: "Current password is incorrect" });
+
+  user.password = newPassword;
+  await user.save();
+
+  res.json({ success: true, message: "Password changed successfully" });
+};
+
+// ── Refresh Token ─────────────────────────────────────────────────────────────
+exports.refreshToken = async (req, res) => {
+  const { refreshToken } = req.body;
+  if (!refreshToken)
+    return res.status(400).json({ success: false, message: "Refresh token required" });
+
+  try {
+    const payload = verifyRefreshToken(refreshToken);
+    const user    = await User.findById(payload.id);
+    if (!user)
+      return res.status(401).json({ success: false, message: "User not found" });
+    const newAccess = generateAccessToken(user._id);
+    res.json({ success: true, accessToken: newAccess });
+  } catch {
+    res.status(401).json({ success: false, message: "Invalid refresh token" });
+  }
+};
+
+// ── Verify Email ──────────────────────────────────────────────────────────────
+exports.verifyEmail = async (req, res) => {
+  const { token } = req.query;
+  const hashTok   = hashToken(token);
+  const user      = await User.findOne({
+    emailVerifyToken:   hashTok,
+    emailVerifyExpires: { $gt: Date.now() },
+  });
+
+  if (!user)
+    return res.status(400).json({ success: false, message: "Invalid or expired verification link" });
+
+  user.isVerified        = true;
+  user.emailVerifyToken  = undefined;
+  user.emailVerifyExpires = undefined;
+  await user.save({ validateBeforeSave: false });
+
+  res.json({ success: true, message: "Email verified successfully" });
+};
+
+// ── Get current user ──────────────────────────────────────────────────────────
+exports.getMe = async (req, res) => {
+  res.json({ success: true, user: req.user.toPublicJSON() });
+};
+
