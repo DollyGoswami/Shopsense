@@ -14,7 +14,6 @@ export const productService = {
     ...(Number.isFinite(pages) && pages > 0 ? { pages } : {}),
   }),
 };
-
 export const recommendService = {
   getRecommendations: (params)    => api.get("/recommendations", { params }),
   getAlternatives:    (id)        => api.get(`/recommendations/alternatives/${id}`),
