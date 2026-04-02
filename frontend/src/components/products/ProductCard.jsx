@@ -296,7 +296,6 @@ function resolveSourceLabel(product = {}) {
       .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
       .join(" ");
   }
-
   if (product.url) {
     if (product.url.includes("amazon.")) return SOURCE_LABELS.amazon;
     if (product.url.includes("flipkart.")) return SOURCE_LABELS.flipkart;
