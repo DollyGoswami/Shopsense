@@ -66,3 +66,56 @@ async def get_twitter_trend_score(keyword: str) -> Optional[dict]:
         print(f"[Trends] Twitter API error for '{keyword}': {e}")
         return None
 
+
+def _estimate_trend_from_scraped_data(product: dict) -> float:
+    """
+    Estimate trend score from scraped product metadata when
+    external APIs are unavailable.
+    Factors: review velocity, discount frequency, price volatility.
+    """
+    score = 40.0  # baseline
+
+    # High review count = popular product
+    reviews = product.get("review_count") or 0
+    if reviews > 50000:
+        score += 25
+    elif reviews > 10000:
+        score += 15
+    elif reviews > 1000:
+        score += 8
+
+    # Large discount often signals promotional push = trending
+    discount = product.get("discount_pct") or 0
+    if discount >= 40:
+        score += 15
+    elif discount >= 20:
+        score += 8
+
+    # High overall rating = well-regarded = more likely being discussed
+    rating = product.get("rating") or 0
+    if rating >= 4.5:
+        score += 10
+    elif rating >= 4.0:
+        score += 5
+
+    return round(min(100, max(0, score)), 1)
+
+
+async def compute_trend_score(product: dict) -> float:
+    """
+    Main entry point: compute trend score for a product.
+    Tries Twitter API, falls back to heuristic estimation.
+    """
+    # Build search keyword from product name (first 3–4 words)
+    name    = product.get("name") or ""
+    keyword = " ".join(name.split()[:4])
+
+    twitter_data = await get_twitter_trend_score(keyword)
+    if twitter_data:
+        return twitter_data["trend_score"]
+
+    # Fallback
+    return _estimate_trend_from_scraped_data(product)
+
+
+
