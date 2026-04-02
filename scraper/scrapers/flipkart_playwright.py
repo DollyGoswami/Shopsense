@@ -101,3 +101,78 @@ async def scrape(query: str, limit: int = 20) -> list[dict]:
 
                 await browser.close()
                 return products_data
+                
+        products_data = await run_playwright_task(_runner)
+
+        products = []
+        for product_data in products_data[:limit]:
+            product = _parse_product(product_data)
+            if product:
+                products.append(product)
+
+        for product in products:
+            await upsert_product(product)
+
+        await log_scrape("flipkart", query, len(products))
+        logger.info(f"Scraped {len(products)} products from Flipkart")
+        return products
+
+    except Exception as e:
+        logger.error(f"Flipkart scrape error: {e}", exc_info=True)
+        return []
+
+
+def _parse_product(product_data: dict) -> Optional[dict]:
+    try:
+        source_id = str(product_data.get("id", "")).strip()
+        if not source_id:
+            return None
+
+        name = normalize_product_name(product_data.get("name", ""))
+        if not name:
+            return None
+
+        current_price = clean_price(str(product_data.get("priceText", "")))
+        if current_price is None:
+            return None
+
+        original_price = clean_price(str(product_data.get("mrpText", "")))
+        discount_text = str(product_data.get("discountText", ""))
+        rating = clean_rating(str(product_data.get("ratingText", "")))
+        review_count = clean_review_count(str(product_data.get("reviewText", "")))
+        image_url = product_data.get("image", "") or ""
+        product_url = product_data.get("url", "") or ""
+
+        if image_url and "128/128" in image_url:
+            image_url = image_url.replace("128/128", "416/416")
+
+        discount_pct = None
+        if discount_text:
+            match = re.search(r"(\d+)\s*%", discount_text)
+            if match:
+                discount_pct = int(match.group(1))
+
+        if discount_pct is None and original_price and original_price > current_price:
+            discount_pct = round(((original_price - current_price) / original_price) * 100)
+
+        return {
+            "source": "flipkart",
+            "source_id": source_id,
+            "name": name,
+            "current_price": current_price,
+            "original_price": original_price,
+            "discount_pct": discount_pct,
+            "rating": rating,
+            "review_count": review_count,
+            "image": image_url,
+            "image_url": image_url,
+            "url": product_url,
+            "product_url": product_url,
+            "currency": "INR",
+            "scraped_at": datetime.now(timezone.utc).isoformat(),
+            "availability": "in_stock",
+        }
+    except Exception as e:
+        logger.error(f"Error parsing product: {e}")
+        return None
+
