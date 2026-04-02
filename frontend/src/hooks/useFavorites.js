@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { favoriteService } from "../services/authService";
 import toast from "react-hot-toast";
 
+
 export function useFavorites() {
   const [favorites,   setFavorites]   = useState([]);
   const [favoriteIds, setFavoriteIds] = useState(new Set());
