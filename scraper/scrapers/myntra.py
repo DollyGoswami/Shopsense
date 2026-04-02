@@ -55,3 +55,38 @@ def _normalize_item(item):
         "description": item.get("additionalInfo") or item.get("searchTags"),
         "scraped_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+
+def _extract_from_html(html: str) -> list[dict]:
+    soup = BeautifulSoup(html, "lxml")
+    products = []
+
+    for script in soup.find_all("script"):
+        text = script.string or script.get_text() or ""
+        if "window.__myx" in text:
+            try:
+                payload = json.loads(text.split("window.__myx =", 1)[1].strip().rstrip(";"))
+                embedded_products = payload.get("searchData", {}).get("results", {}).get("products", [])
+                for item in embedded_products:
+                    normalized = _normalize_item(item)
+                    if normalized["name"] and normalized["source_id"]:
+                        products.append(normalized)
+            except Exception:
+                pass
+
+        if "products" not in text.lower():
+            continue
+
+        for match in re.finditer(r'(\{"products":.*?\})\s*;?', text, re.DOTALL):
+            try:
+                payload = json.loads(match.group(1))
+                for item in payload.get("products", []):
+                    normalized = _normalize_item(item)
+                    if normalized["name"] and normalized["source_id"]:
+                        products.append(normalized)
+            except Exception:
+                continue
+
+    return products
+
