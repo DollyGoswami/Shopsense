@@ -15,7 +15,6 @@ const QUICK_CHIPS = [
   { label: "Hidden gems", q: "hidden gem products" },
   { label: "Recent price drops", q: "price drop" },
 ];
-
 function TypingDots() {
   return (
     <div
@@ -48,7 +47,6 @@ function TypingDots() {
 
 function MessageBubble({ msg }) {
   const isUser = msg.role === "user";
-
   return (
     <motion.div
       initial={{ opacity: 0, y: 12, scale: 0.95 }}
