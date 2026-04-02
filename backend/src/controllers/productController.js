@@ -337,3 +337,340 @@ exports.searchProducts = async (req, res) => {
       { brand: { $regex: fuzzyRegex } },
       { category: { $regex: fuzzyRegex } },
     ];
+
+  
+    const [fuzzyTotal, fuzzyProducts] = await Promise.all([
+      Product.countDocuments(fallbackFilter),
+      Product.find(fallbackFilter)
+        .select(productListProjection)
+        .sort(selectedSort)
+        .limit(queryLimit)
+        .lean(),
+    ]);
+
+    if (fuzzyProducts.length > products.length) {
+      products = fuzzyProducts;
+      total = fuzzyTotal;
+    }
+
+    if (products.length === 0) {
+      try {
+        const tokens = normalizedQuery
+          .toLowerCase()
+          .split(/\s+/)
+          .filter((token) => token.length >= 2);
+        const tokenFilter = tokens.length
+          ? {
+              $or: tokens.flatMap((token) => {
+                const tokenRegex = new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+                return [
+                  { name: tokenRegex },
+                  { brand: tokenRegex },
+                  { category: tokenRegex },
+                ];
+              }),
+            }
+          : {
+              $or: [
+                { name: { $exists: true, $ne: "" } },
+                { brand: { $exists: true, $ne: "" } },
+                { category: { $exists: true, $ne: "" } },
+              ],
+            };
+
+        const allProducts = await Product.find(tokenFilter)
+          .select({
+            name: 1,
+            brand: 1,
+            category: 1,
+            currentPrice: 1,
+            current_price: 1,
+            originalPrice: 1,
+            original_price: 1,
+            discountPct: 1,
+            discount_pct: 1,
+            rating: 1,
+            reviewCount: 1,
+            review_count: 1,
+            scores: 1,
+            url: 1,
+            affiliateUrl: 1,
+            source: 1,
+            sourceId: 1,
+            source_id: 1,
+            image: 1,
+            buyDecision: 1,
+            updatedAt: 1,
+            updated_at: 1,
+            scrapedAt: 1,
+            scraped_at: 1,
+          })
+          .sort(selectedSort)
+          .limit(Math.max(MAX_FUZZY_CANDIDATES, queryLimit))
+          .lean();
+
+        if (allProducts.length > 0) {
+          const fuse = new Fuse(allProducts, {
+            keys: [
+              { name: "name", weight: 0.5 },
+              { name: "brand", weight: 0.3 },
+              { name: "category", weight: 0.2 },
+            ],
+            threshold: 0.32,
+            includeScore: true,
+            shouldSort: true,
+            minMatchCharLength: 2,
+          });
+
+          const fuzzyResults = fuse.search(normalizedQuery);
+          const matchedIds = fuzzyResults
+            .filter((result) => result.score < 0.45)
+            .slice(0, Number(limit))
+            .map((result) => result.item._id);
+
+          if (matchedIds.length > 0) {
+            products = await Product.find({
+              _id: { $in: matchedIds },
+            })
+              .select(productListProjection)
+              .lean();
+
+            const scoreMap = new Map(fuzzyResults.map((r) => [r.item._id.toString(), r.score]));
+            products.sort((a, b) => {
+              const scoreA = scoreMap.get(a._id.toString()) || 1;
+              const scoreB = scoreMap.get(b._id.toString()) || 1;
+              return scoreA - scoreB;
+            });
+            total = matchedIds.length;
+          }
+        }
+      } catch (error) {
+        console.error("Fuzzy search error:", error);
+      }
+    }
+  }
+
+  if (shouldDiversifySources && products.length > Number(limit)) {
+    products = diversifyProductsBySource(products, Number(limit));
+  }
+
+  // If products are found but none have a valid score, enrich them via ML scoring.
+  const allProductsMissingScore = products.length > 0 && products.every((product) => {
+    const score = getProductScore(product);
+    return score === null || score === 0;
+  });
+
+  if (allProductsMissingScore) {
+    try {
+      const { data: scoreData } = await axios.post(
+        `${ML_SERVICE_URL}/recommend/score`,
+        { products },
+        { timeout: 15000 }
+      );
+      if (scoreData?.scored?.length) {
+        products = scoreData.scored;
+      }
+    } catch (error) {
+      console.error("ML scoring enrichment failed:", error?.message || error);
+    }
+  }
+
+  const scrapeSeed = normalizedQuery || normalizedCategory;
+  let scrapeQueued = false;
+  // Always scrape for new queries (page 1) with sufficient length,
+  // regardless of existing database results
+  if (!shouldSkipAutoScrape && scrapeSeed.length >= MIN_SCRAPE_QUERY_LENGTH && Number(page) === 1) {
+    scrapeQueued = queueScrape(scrapeSeed, DEFAULT_SCRAPE_PAGES);
+  }
+
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+
+  res.json({
+    success: true,
+    total,
+    page: Number(page),
+    pages: Math.ceil(total / Number(limit)),
+    scrapeQueued,
+    scrapeQuery: scrapeQueued ? scrapeSeed : null,
+    products: products.map(normalizeProduct),
+  });
+};
+
+exports.getProduct = async (req, res) => {
+  const product = await Product.findById(req.params.id).lean();
+  if (!product) {
+    return res.status(404).json({ success: false, message: "Product not found" });
+  }
+  res.json({ success: true, product: normalizeProduct(product) });
+};
+
+exports.getPriceHistory = async (req, res) => {
+  const { id } = req.params;
+  const { days = 90 } = req.query;
+
+  const product = await Product.findById(id).lean();
+  if (!product) {
+    return res.status(404).json({ success: false, message: "Product not found" });
+  }
+
+  const since = new Date(Date.now() - Number(days) * 24 * 60 * 60 * 1000);
+  const sourceId = product.sourceId || product.source_id;
+  const productId = product.productId || product.product_id || (product.source && sourceId ? `${product.source}_${sourceId}` : null);
+
+  const history = await PriceHist.find({
+    $or: [
+      { productId: product._id },
+      { productId: String(product._id) },
+      ...(productId ? [{ product_id: productId }] : []),
+      ...(product.source && sourceId ? [{ source: product.source, sourceId }, { source: product.source, source_id: sourceId }] : []),
+    ],
+    timestamp: { $gte: since },
+  })
+    .sort({ timestamp: 1 })
+    .lean();
+
+  res.json({
+    success: true,
+    history: history.map((entry) => ({
+      ...entry,
+      oldPrice: entry.oldPrice ?? entry.old_price ?? null,
+      productId: entry.productId ?? entry.product_id ?? null,
+    })),
+  });
+};
+
+exports.compareProducts = async (req, res) => {
+  const { name, id } = req.query;
+  if (!name && !id) {
+    return res.status(400).json({ success: false, message: "Product name or id required" });
+  }
+
+  let baseProduct = null;
+  if (id) {
+    baseProduct = await Product.findById(id).lean();
+  }
+
+  const normalizedName = String(name || baseProduct?.name || "").trim();
+  if (!normalizedName && !baseProduct) {
+    return res.status(400).json({ success: false, message: "Product name or id required" });
+  }
+
+  let products = await Product.find({ $text: { $search: normalizedName } })
+    .sort({ current_price: 1, currentPrice: 1, updatedAt: -1 })
+    .limit(20)
+    .lean();
+
+  if (!products.length) {
+    const regexPattern = normalizedName
+      .split(/\s+/)
+      .map((token) => token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+      .join(".*");
+    const fuzzyRegex = new RegExp(regexPattern, "i");
+
+    products = await Product.find({
+      $or: [
+        { name: { $regex: fuzzyRegex } },
+        { title: { $regex: fuzzyRegex } },
+      ],
+    })
+      .sort({ current_price: 1, currentPrice: 1, updatedAt: -1 })
+      .limit(20)
+      .lean();
+  }
+
+  const normalizedBaseName = normalizedName.toLowerCase();
+  baseProduct =
+    baseProduct ||
+    products.find((product) => String(product.name || product.title || "").trim().toLowerCase() === normalizedBaseName) ||
+    products[0];
+
+  if (!baseProduct) {
+    return res.json({ success: true, cheapest: null, comparison: [] });
+  }
+
+  const comparableProducts = products.filter((product) => isComparableProduct(baseProduct, product));
+
+  const bySource = {};
+  bySource[baseProduct.source] = baseProduct;
+  comparableProducts.forEach((product) => {
+    const currentPrice = product.currentPrice ?? product.current_price ?? Number.MAX_SAFE_INTEGER;
+    if (!bySource[product.source] || currentPrice < (bySource[product.source].currentPrice ?? bySource[product.source].current_price ?? Number.MAX_SAFE_INTEGER)) {
+      bySource[product.source] = product;
+    }
+  });
+
+  const cheapest = Object.values(bySource)
+    .map(normalizeProduct)
+    .sort((a, b) => (a.currentPrice ?? 0) - (b.currentPrice ?? 0));
+
+  res.json({
+    success: true,
+    cheapest: cheapest[0] || null,
+    comparison: cheapest,
+  });
+};
+
+exports.triggerScrape = async (req, res) => {
+  const query = String(req.body?.query || "").trim();
+  const requestedPages = Number(req.body?.pages);
+  const pages = Number.isFinite(requestedPages) && requestedPages > 0 ? requestedPages : DEFAULT_SCRAPE_PAGES;
+  const requestedSources = Array.isArray(req.body?.sources)
+    ? req.body.sources.map((source) => String(source || "").trim()).filter(Boolean)
+    : undefined;
+
+  if (!query) {
+    return res.status(400).json({ success: false, message: "Query required" });
+  }
+  if (query.length < MIN_SCRAPE_QUERY_LENGTH) {
+    return res.status(400).json({
+      success: false,
+      message: `Query must be at least ${MIN_SCRAPE_QUERY_LENGTH} characters`,
+    });
+  }
+
+  try {
+    const queued = queueScrape(query, pages, requestedSources);
+    res.json({
+      success: true,
+      message: queued ? `Scraping started for: ${query}` : `Scraping for "${query}" is already running`,
+      queued,
+      sources: requestedSources || null,
+    });
+  } catch {
+    res.json({ success: true, message: "Scraping queued (scraper may be starting up)" });
+  }
+};
+
+exports.getTrending = async (req, res) => {
+  const products = await Product.find({
+    ...priceExistsFilter,
+    "scores.trendScore": { $gte: 70 },
+  })
+    .sort({ "scores.trendScore": -1, updatedAt: -1 })
+    .limit(12)
+    .lean();
+
+  res.json({ success: true, products: products.map(normalizeProduct) });
+};
+
+exports.getBestDeals = async (req, res) => {
+  const products = await Product.find({
+    ...priceExistsFilter,
+    $or: [
+      { discountPct: { $gte: 20 } },
+      { discount_pct: { $gte: 20 } },
+    ],
+  })
+    .sort({ discount_pct: -1, discountPct: -1 })
+    .limit(12)
+    .lean();
+
+  res.json({ success: true, products: products.map(normalizeProduct) });
+};
+
+exports.getCategories = async (req, res) => {
+  const categories = await Product.distinct("category");
+  res.json({ success: true, categories: categories.filter(Boolean).sort() });
+};
