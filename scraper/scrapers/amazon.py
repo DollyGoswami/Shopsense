@@ -147,3 +147,101 @@ def _parse_search_results(html: str) -> list[dict]:
             continue
 
     return products
+  
+def _parse_product_detail(html: str, asin: str) -> Optional[dict]:
+    """Parse a single Amazon product detail page for full info."""
+    soup = BeautifulSoup(html, "lxml")
+
+    try:
+        name_tag = soup.select_one("#productTitle")
+        name = normalize_product_name(name_tag.get_text() if name_tag else "")
+
+        # Price
+        price_tag = soup.select_one(".a-price-whole") or soup.select_one("#priceblock_ourprice") or soup.select_one("#priceblock_dealprice")
+        current_price = clean_price(price_tag.get_text() if price_tag else "")
+
+        # MRP
+        mrp_tag = soup.select_one("#priceblock_saleprice") or soup.select_one(".a-text-price")
+        original_price = clean_price(mrp_tag.get_text() if mrp_tag else "")
+
+        # Rating
+        rating_tag = soup.select_one("#acrPopover span.a-size-base")
+        rating = clean_rating(rating_tag.get_text() if rating_tag else "")
+
+        # Reviews
+        reviews_tag = soup.select_one("#acrCustomerReviewText")
+        review_count = clean_review_count(reviews_tag.get_text() if reviews_tag else "")
+
+        # Main image
+        img_tag = soup.select_one("#landingImage") or soup.select_one("#imgBlkFront")
+        image = None
+        if img_tag:
+            image = img_tag.get("data-old-hires") or img_tag.get("src")
+
+        # Availability
+        avail_tag = soup.select_one("#availability span")
+        availability = detect_availability(avail_tag.get_text() if avail_tag else "")
+
+        # Features (bullet points)
+        feature_bullets = soup.select("#feature-bullets ul li span.a-list-item")
+        features = [b.get_text().strip() for b in feature_bullets[:5] if b.get_text().strip()]
+
+        # Brand
+        brand_tag = soup.select_one("#bylineInfo") or soup.select_one("a#brand")
+        brand = brand_tag.get_text().replace("Brand:", "").replace("Visit the", "").strip() if brand_tag else None
+
+        # Category
+        breadcrumbs = soup.select("#wayfinding-breadcrumbs_feature_div a")
+        category = breadcrumbs[-1].get_text().strip() if breadcrumbs else "Electronics"
+
+        return {
+            "source":         "amazon",
+            "source_id":      asin,
+            "name":           name,
+            "url":            f"https://www.amazon.in/dp/{asin}",
+            "image":          image,
+            "current_price":  current_price,
+            "original_price": original_price,
+            "discount_pct":   round(((original_price - current_price) / original_price) * 100) if original_price and current_price and original_price > current_price else None,
+            "rating":         rating,
+            "review_count":   review_count,
+            "brand":          brand,
+            "category":       category,
+            "features":       features,
+            "currency":       "INR",
+            "availability":   availability,
+            "scraped_at":     datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        print(f"[Amazon] Detail parse error: {e}")
+        return None
+
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+async def _fetch_html(url: str) -> Optional[str]:
+    """Fetch HTML with httpx + proxy support."""
+    proxy = proxy_manager.get_proxy()
+    headers = get_amazon_headers()
+
+    try:
+        async with httpx.AsyncClient(
+            proxy=proxy,
+            headers=headers,
+            follow_redirects=True,
+            timeout=20,
+        ) as client:
+            await asyncio.sleep(random.uniform(1.0, 3.0))   # polite delay
+            response = await client.get(url)
+            response.raise_for_status()
+            return response.text
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 503:
+            raise   # Trigger retry
+        print(f"[Amazon] HTTP error {e.response.status_code} for {url}")
+        return None
+    except Exception as e:
+        if proxy:
+            proxy_manager.mark_bad(proxy)
+        raise
+
+
