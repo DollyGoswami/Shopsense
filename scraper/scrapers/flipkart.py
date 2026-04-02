@@ -293,3 +293,147 @@ def _parse_product_detail(html: str, pid: str, url: str) -> Optional[dict]:
                 url = href if href.startswith("http") else BASE_URL + href
 
             pid = (card.get("data-id") or "").strip() or _extract_pid(url, name)
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
+async def _fetch_html(url: str) -> Optional[str]:
+    proxy = proxy_manager.get_proxy()
+    try:
+        async with httpx.AsyncClient(
+            proxy=proxy,
+            headers=get_flipkart_headers(),
+            follow_redirects=True,
+            timeout=20,
+        ) as client:
+            await asyncio.sleep(random.uniform(2.0, 4.0))
+            response = await client.get(url)
+            if response.status_code in {403, 429, 503}:
+                return response.text
+            response.raise_for_status()
+            return response.text
+    except Exception:
+        if proxy:
+            proxy_manager.mark_bad(proxy)
+        raise
+
+
+async def _fetch_with_playwright(url: str) -> Optional[str]:
+    supported, reason = _playwright_status()
+    if not supported:
+        print(f"[Flipkart] Playwright unavailable: {reason}")
+        return None
+
+    try:
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.async_api import async_playwright
+
+        async def _runner():
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                context = await browser.new_context(
+                    user_agent=get_flipkart_headers()["User-Agent"],
+                    locale="en-IN",
+                    timezone_id="Asia/Kolkata",
+                )
+                page = await context.new_page()
+
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    await page.wait_for_timeout(random.randint(2500, 4500))
+                    html = await page.content()
+                except PlaywrightTimeoutError:
+                    html = await page.content()
+                finally:
+                    await browser.close()
+
+                return html
+
+        return await run_playwright_task(_runner)
+    except NotImplementedError as e:
+        print(f"[Flipkart] Playwright environment not supported: {e}")
+        return None
+    except Exception as e:
+        print(f"[Flipkart] Playwright error: {e}")
+        return None
+
+
+async def scrape_search(query: str, pages: int = 2) -> list[dict]:
+    all_products = []
+    playwright_supported, playwright_reason = _playwright_status()
+
+    for page in range(1, pages + 1):
+        url = _build_search_url(query, page)
+        print(f"[Flipkart] Scraping: {url}")
+
+        try:
+            html = await _fetch_html(url)
+        except Exception as e:
+            print(f"[Flipkart] HTTP fetch failed: {e}")
+            html = None
+        used_playwright = False
+
+        if html and _is_blocked_html(html):
+            print("[Flipkart] HTTP fetch was blocked. Trying Playwright fallback.")
+            if playwright_supported:
+                html = await _fetch_with_playwright(url)
+                used_playwright = bool(html)
+            else:
+                print(f"[Flipkart] Skipping Playwright fallback: {playwright_reason}")
+
+        products = _parse_search_results(html or "")
+        if not products and not used_playwright:
+            print("[Flipkart] No products found in HTTP HTML. Trying Playwright fallback.")
+            if playwright_supported:
+                html = await _fetch_with_playwright(url)
+                products = _parse_search_results(html or "")
+            else:
+                print(f"[Flipkart] Skipping Playwright fallback: {playwright_reason}")
+
+        if not products and playwright_supported:
+            try:
+                from scrapers import flipkart_playwright
+
+                print("[Flipkart] HTML parsing returned no products. Trying dedicated Playwright scraper.")
+                products = _standardize_playwright_products(
+                    await flipkart_playwright.scrape(query, limit=max(20, pages * 20))
+                )
+            except Exception as e:
+                print(f"[Flipkart] Dedicated Playwright fallback failed: {e}")
+        elif not products:
+            print(f"[Flipkart] Skipping dedicated Playwright scraper: {playwright_reason}")
+
+        filtered_products = _filter_relevant_products(products, query)
+        if products and not filtered_products:
+            print(f"[Flipkart] Filtered out {len(products)} irrelevant products for query '{query}'")
+        elif len(filtered_products) != len(products):
+            print(f"[Flipkart] Filtered {len(products) - len(filtered_products)} weak matches for query '{query}'")
+
+        products = filtered_products
+        print(f"[Flipkart] Page {page}: {len(products)} products")
+
+        if not html and not products:
+            break
+
+        if products:
+            await upsert_products(products)
+
+        all_products.extend(products)
+        await asyncio.sleep(random.uniform(3.0, 6.0))
+
+    await log_scrape("flipkart", query, len(all_products))
+    return all_products
+
+
+async def scrape_product(product_id: str, url: str) -> Optional[dict]:
+    html = await _fetch_html(url)
+    if html and _is_blocked_html(html):
+        html = await _fetch_with_playwright(url)
+    if not html:
+        html = await _fetch_with_playwright(url)
+    if not html:
+        return None
+
+    product = _parse_product_detail(html, product_id, url)
+    if product:
+        await upsert_product(product)
+
+    return product
