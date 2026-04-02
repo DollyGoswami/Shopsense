@@ -49,7 +49,6 @@ function sourceLabel(s) {
   const k = String(s || "").trim().toLowerCase();
   return SOURCE_LABELS[k] || String(s || "Store");
 }
-
 function sourceMeta(s) {
   return SOURCE_META[String(s || "").trim().toLowerCase()] || { bg: "#444", letter: (s || "?")[0].toUpperCase() };
 }
