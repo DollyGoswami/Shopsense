@@ -57,6 +57,7 @@ export default function App() {
         </motion.div>
       )}
 
+      
       {phase === "app" && (
         <motion.div
           key="app"
