@@ -1,0 +1,29 @@
+[
+  {
+    "id": "flipkart-mega-2026",
+    "title": "Flipkart Mega Sale",
+    "description": "Flipkart's flagship mega-sale event. Exact 2026 dates will be announced by Flipkart.",
+    "date_label": "To be announced",
+    "region": "IN",
+    "source": "Flipkart",
+    "note": "Flipkart has not yet published official Big Billion Days dates."
+  },
+  {
+    "id": "amazon-prime-2026",
+    "title": "Amazon Prime Day",
+    "description": "Prime Day deals across categories in India. Amazon has confirmed the event for July 2026; exact dates are pending.",
+    "date_label": "July 2026",
+    "region": "Global",
+    "source": "Amazon",
+    "note": "Exact Amazon Prime Day dates will be announced closer to the event."
+  },
+  {
+    "id": "seasonal-clearance-2026",
+    "title": "Seasonal Clearance",
+    "description": "Major retailer clearance events. Exact timings are not yet confirmed.",
+    "date_label": "To be announced",
+    "region": "IN",
+    "source": "Multiple",
+    "note": "This entry is a general placeholder for upcoming clearance events."
+  }
+]
